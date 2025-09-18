@@ -1,0 +1,46 @@
+name: smoke-lite
+on:
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  healthz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (lenient)
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          python - <<'PY'
+          import sys, subprocess
+          pkgs = ["fastapi", "uvicorn[standard]"]
+          subprocess.check_call([sys.executable, "-m", "pip", "install", *pkgs])
+          PY
+
+      - name: Boot app (background)
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 > server.log 2>&1 &
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:8001/healthz >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "healthz not ready"; tail -n +1 server.log; exit 1
+
+      - name: Assert healthz 200
+        run: curl -fsS http://127.0.0.1:8001/healthz >/dev/null
+
+      - name: Assert no DEBUG in logs
+        run: |
+          if grep -qi '\bDEBUG\b' server.log; then
+            echo "DEBUG marker found in logs"; exit 1
+          fi
+
+      - name: Teardown
+        if: always()
+        run: pkill -f "uvicorn" || true
