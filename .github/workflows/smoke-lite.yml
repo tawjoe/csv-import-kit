@@ -1,12 +1,26 @@
 name: smoke-lite
 on:
   pull_request:
-    branches: [ "**" ]
+    branches: ["**"]
 
 jobs:
   healthz:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
+
+    services:
+      db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: csvkit
+        ports:
+          - "5432:5432"   # ランナー内ローカルのみ
+        options: >-
+          --health-cmd "pg_isready -U app -d csvkit"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,14 +33,31 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           python - <<'PY'
           import sys, subprocess
-          pkgs = ["fastapi", "uvicorn[standard]"]
+          pkgs = ["fastapi", "uvicorn[standard]", "psycopg[binary]"]
           subprocess.check_call([sys.executable, "-m", "pip", "install", *pkgs])
           PY
+
+      - name: Wait for DB (TCP)
+        run: |
+          python - <<'PY'
+          import socket, time
+          for i in range(60):
+              try:
+                  with socket.create_connection(("127.0.0.1", 5432), timeout=1):
+                      print("db tcp ok"); break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("db not ready within 60s")
+          PY
+
+      - name: Export DB_DSN
+        run: echo "DB_DSN=postgresql://app:app@127.0.0.1:5432/csvkit" >> $GITHUB_ENV
 
       - name: Boot app (background)
         run: |
           nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 > server.log 2>&1 &
-          for i in {1..20}; do
+          for i in {1..40}; do
             if curl -fsS http://127.0.0.1:8001/healthz >/dev/null; then exit 0; fi
             sleep 1
           done
